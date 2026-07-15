@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { mkdtemp, mkdir, rm } from 'node:fs/promises';
-import { request } from 'node:http';
+import { createServer, request } from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -75,6 +75,54 @@ async function createWatcherRoots(prefix) {
     mkdir(codexRoot, { recursive: true }),
   ]);
   return { root, claudeRoot, codexRoot };
+}
+
+async function readRequestBody(incoming) {
+  const chunks = [];
+  for await (const chunk of incoming) chunks.push(chunk);
+  return Buffer.concat(chunks).toString('utf8');
+}
+
+async function startFakeVoicevox() {
+  const calls = [];
+  const engine = createServer(async (incoming, response) => {
+    const target = new URL(incoming.url, 'http://127.0.0.1');
+    calls.push({
+      method: incoming.method,
+      pathname: target.pathname,
+      speaker: target.searchParams.get('speaker'),
+      text: target.searchParams.get('text'),
+      body: await readRequestBody(incoming),
+    });
+
+    if (target.pathname === '/audio_query') {
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify({ accent_phrases: [], speedScale: 1 }));
+      return;
+    }
+
+    if (target.pathname === '/synthesis') {
+      response.writeHead(200, { 'Content-Type': 'audio/wav' });
+      response.end(Buffer.from('RIFFfake-wave'));
+      return;
+    }
+
+    response.writeHead(404);
+    response.end();
+  });
+  await new Promise((resolve, reject) => {
+    engine.once('error', reject);
+    engine.listen(0, '127.0.0.1', () => {
+      engine.off('error', reject);
+      resolve();
+    });
+  });
+  const address = engine.address();
+  return {
+    calls,
+    url: `http://127.0.0.1:${address.port}`,
+    close: () => new Promise((resolve, reject) => engine.close((error) => error ? reject(error) : resolve())),
+  };
 }
 
 test('startup token protects HTTP assets and WebSocket snapshots', async (t) => {
@@ -171,4 +219,45 @@ test('startup token protects HTTP assets and WebSocket snapshots', async (t) => 
     const staleUrl = new URL(protectedUrl.pathname, nextUrl.origin);
     assert.equal((await fetch(staleUrl)).status, 403);
   });
+});
+
+test('VOICEVOX synthesis endpoint stays token-scoped and proxies to loopback engine', async (t) => {
+  const roots = await createWatcherRoots('agentarium-space-voice-test-');
+  const voicevox = await startFakeVoicevox();
+  const handle = await startServer({
+    port: 0,
+    claudeRoot: roots.claudeRoot,
+    codexRoot: roots.codexRoot,
+    voicevoxUrl: voicevox.url,
+  });
+  t.after(async () => {
+    await handle.close();
+    await voicevox.close();
+    await rm(roots.root, { recursive: true, force: true });
+  });
+
+  const protectedUrl = new URL(handle.url);
+  const synthesisUrl = new URL('voicevox/synthesis', protectedUrl);
+  const rootSynthesisUrl = new URL('/voicevox/synthesis', protectedUrl);
+
+  assert.equal((await fetch(rootSynthesisUrl, {
+    method: 'POST',
+    body: JSON.stringify({ text: '読まない', speaker: 'zundamon' }),
+  })).status, 403);
+
+  const response = await fetch(synthesisUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text: 'こんにちは', speaker: 'zundamon' }),
+  });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('content-type'), 'audio/wav');
+  assert.equal(await response.text(), 'RIFFfake-wave');
+
+  assert.equal(voicevox.calls.length, 2);
+  assert.equal(voicevox.calls[0].pathname, '/audio_query');
+  assert.equal(voicevox.calls[0].speaker, '3');
+  assert.equal(voicevox.calls[0].text, 'こんにちは');
+  assert.equal(voicevox.calls[1].pathname, '/synthesis');
+  assert.equal(voicevox.calls[1].speaker, '3');
 });

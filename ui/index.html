@@ -22,6 +22,15 @@
             <p class="hud-count"><span class="state-dot status-idle"></span><span>Idle</span><strong id="status-count-idle">0</strong></p>
           </div>
           <p class="hud-sync" id="hud-sync"><span>Sync</span><strong id="sync-elapsed">—</strong></p>
+          <div class="voice-control" id="voice-control" aria-label="VOICEVOX 読み上げ">
+            <button class="voice-toggle" id="voice-toggle" type="button" aria-pressed="false">Voice off</button>
+            <select class="voice-speaker" id="voice-speaker" aria-label="話者">
+              <option value="auto">Auto</option>
+              <option value="zundamon">ずんだもん</option>
+              <option value="metan">四国めたん</option>
+            </select>
+            <span class="voice-status" id="voice-status">Silent</span>
+          </div>
           <div class="hud-sparkline" aria-label="直近15分のイベント毎分推移">
             <span>Events/min</span>
             <canvas id="event-sparkline" width="80" height="24" aria-hidden="true"></canvas>

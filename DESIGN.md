@@ -514,6 +514,36 @@ startedAt は toPublicSession で公開済み）:
 名札にある情報を注記に再掲しない。canvas fillText のみ（XSS 制約）・30fps・reduced-motion・
 決定論（スロット選好は状態から一意）の維持。
 
+### ローカル音声実況レイヤ（v2.15 — VOICEVOX 読み上げ）
+
+> `lastMessage` の星図注記に、任意のローカル音声実況を重ねる。観賞体験を増やすための耳のレイヤであり、
+> 画面上の orb・注記・パネル構造は増やさない。
+
+サーバ側（src/server.js）:
+
+- `POST /<token>/voicevox/synthesis` を追加し、ブラウザからの短い読み上げ要求をローカルの
+  VOICEVOX Engine に中継する。既定接続先は `http://127.0.0.1:50021`、環境変数
+  `AGENTARIUM_VOICEVOX_URL` で変更可能。ただし接続先は `http://127.0.0.1` / `http://localhost`
+  のみ許可する
+- token path・HTTP Host 検証・`Cache-Control: no-store` は既存の静的配信と同じ制約に従う。
+  外部送信・telemetry は行わない
+- リクエスト body は JSON `{ text, speaker }`。`text` は最大 180 文字に丸め、speaker は
+  `zundamon`（VOICEVOX speaker 3）/ `metan`（speaker 2）/ 数値 speaker id のみ受け付ける
+- Engine 未起動・失敗時は 503 を返し、UI 本体や WebSocket 配信は継続する
+
+UI 側（ui/）:
+
+- ヘッダ HUD に小さな VOICEVOX トグルと話者選択だけを追加する。Canvas には音声用の常時表示要素を
+  足さない
+- 既定は off。利用者のクリックで on にした後だけ読み上げる。設定は localStorage
+  `agentarium.voice.enabled` / `agentarium.voice.speaker` に保存する
+- `lastMessageAt` が前回 snapshot より進んだ発話だけを読み上げ、初回 snapshot や新規発見された
+  既存セッションの過去発話は読まない。キューは短く保ち、古い発話で現在の観賞を埋めない
+- 話者 `auto` は Claude 系をずんだもん、Codex 系を四国めたんに割り当てる。固定指定時は選択話者だけを使う
+
+制約: 読み上げ対象は実ログ由来の `lastMessage` のみ。ログファイルは読み取り専用のまま。
+VOICEVOX への送信も loopback 限定で、外部ネットワークへ出さない。音声失敗は表示機能へ波及させない。
+
 ### モーション品質
 
 - requestAnimationFrame ループ（**30fps にフレームスキップでキャップ**）。位置・輝度・スケールは全て lerp/減衰の連続変化。CSS keyframes の繰り返しに頼らない
