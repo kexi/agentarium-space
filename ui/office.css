@@ -157,7 +157,8 @@ button:focus-visible {
 .hud-count,
 .hud-sync,
 .hud-total,
-.connection {
+.connection,
+.voice-control {
   display: flex;
   align-items: center;
 }
@@ -225,6 +226,58 @@ button:focus-visible {
 .hud-sync {
   padding-left: 12px;
   border-left: 1px solid var(--line);
+}
+
+.voice-control {
+  gap: 6px;
+  padding-left: 12px;
+  border-left: 1px solid var(--line);
+  pointer-events: auto;
+}
+
+.voice-toggle,
+.voice-speaker {
+  height: 22px;
+  border: 1px solid rgb(167 227 255 / 18%);
+  border-radius: 4px;
+  color: rgb(255 255 255 / 62%);
+  background: rgb(7 13 24 / 58%);
+  font: 600 0.54rem/1 var(--utility);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.voice-toggle {
+  min-width: 69px;
+  padding: 0 8px;
+  cursor: pointer;
+}
+
+.voice-toggle[aria-pressed="true"] {
+  border-color: rgb(167 227 255 / 34%);
+  color: var(--cyan);
+  box-shadow: 0 0 12px rgb(79 163 227 / 16%);
+}
+
+.voice-speaker {
+  max-width: 96px;
+  padding: 0 5px;
+  color: rgb(255 255 255 / 58%);
+}
+
+.voice-status {
+  max-width: 76px;
+  overflow: hidden;
+  color: var(--text-muted);
+  font: 600 0.5rem/1 var(--utility);
+  letter-spacing: 0.06em;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.voice-status.is-error {
+  color: var(--amber);
 }
 
 .hud-total {
@@ -904,6 +957,10 @@ button:focus-visible {
     gap: 12px;
   }
 
+  .voice-status {
+    display: none;
+  }
+
   .state-counts {
     gap: 9px;
   }
@@ -947,6 +1004,15 @@ button:focus-visible {
 
   .connection {
     font-size: 0.52rem;
+  }
+
+  .voice-control {
+    gap: 4px;
+    padding-left: 8px;
+  }
+
+  .voice-speaker {
+    width: 64px;
   }
 
   .focus-body {

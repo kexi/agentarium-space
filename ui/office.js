@@ -58,12 +58,19 @@ const POOL_EVENT_WINDOW_MS = 60 * 1000;
 const EVENT_WINDOW_MS = 15 * 60 * 1000;
 const LONG_RUN_MS = 10 * 60 * 1000;
 const GLOBAL_EVENT_LIMIT = 20;
+const VOICE_STORAGE_ENABLED = 'agentarium.voice.enabled';
+const VOICE_STORAGE_SPEAKER = 'agentarium.voice.speaker';
+const VOICE_TEXT_LIMIT = 140;
+const VOICE_QUEUE_LIMIT = 5;
 
 const canvas = document.querySelector('#bay-canvas');
 const canvasRegion = document.querySelector('#canvas-region');
 const hudClock = document.querySelector('#hud-clock');
 const syncElapsed = document.querySelector('#sync-elapsed');
 const hudSync = document.querySelector('#hud-sync');
+const voiceToggle = document.querySelector('#voice-toggle');
+const voiceSpeaker = document.querySelector('#voice-speaker');
+const voiceStatus = document.querySelector('#voice-status');
 const hudTotalOutput = document.querySelector('#hud-total-output');
 const eventSparkline = document.querySelector('#event-sparkline');
 const statusCountElements = Object.fromEntries(
@@ -373,6 +380,212 @@ class WSClient {
     clearTimeout(this.reconnectTimer);
     this.socket?.close();
     this.socket = null;
+  }
+}
+
+function compactVoiceText(value) {
+  const isString = typeof value === 'string';
+  const shouldIgnore = !isString;
+  if (shouldIgnore) return '';
+  const text = value.replace(/\s+/g, ' ').trim();
+  const characters = Array.from(text);
+  const isTooLong = characters.length > VOICE_TEXT_LIMIT;
+  if (isTooLong) return `${characters.slice(0, VOICE_TEXT_LIMIT).join('')}…`;
+  return text;
+}
+
+function storedVoiceEnabled() {
+  try {
+    return localStorage.getItem(VOICE_STORAGE_ENABLED) === 'true';
+  } catch {
+    return false;
+  }
+}
+
+function storedVoiceSpeaker() {
+  try {
+    const value = localStorage.getItem(VOICE_STORAGE_SPEAKER);
+    const isKnownValue = ['auto', 'zundamon', 'metan'].includes(value);
+    return isKnownValue ? value : 'auto';
+  } catch {
+    return 'auto';
+  }
+}
+
+function saveVoiceSetting(key, value) {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // localStorage may be unavailable in hardened browser contexts; voice still works for the session.
+  }
+}
+
+class VoiceAnnouncer {
+  constructor({ toggleButton, speakerSelect, statusElement }) {
+    this.toggleButton = toggleButton;
+    this.speakerSelect = speakerSelect;
+    this.statusElement = statusElement;
+    this.enabled = storedVoiceEnabled();
+    this.speakerMode = storedVoiceSpeaker();
+    this.queue = [];
+    this.playing = false;
+    this.currentAudio = null;
+    this.stopCurrentAudio = null;
+    this.lastSeenMessageAt = new Map();
+
+    this.speakerSelect.value = this.speakerMode;
+    this.toggleButton.addEventListener('click', () => this.setEnabled(!this.enabled));
+    this.speakerSelect.addEventListener('change', () => {
+      const isKnownValue = ['auto', 'zundamon', 'metan'].includes(this.speakerSelect.value);
+      this.speakerMode = isKnownValue ? this.speakerSelect.value : 'auto';
+      this.speakerSelect.value = this.speakerMode;
+      saveVoiceSetting(VOICE_STORAGE_SPEAKER, this.speakerMode);
+    });
+    this.updateControls();
+  }
+
+  setEnabled(enabled) {
+    this.enabled = enabled;
+    saveVoiceSetting(VOICE_STORAGE_ENABLED, String(enabled));
+    const shouldStop = !enabled;
+    if (shouldStop) {
+      this.queue = [];
+      this.stopCurrentAudio?.();
+      this.currentAudio = null;
+      this.stopCurrentAudio = null;
+      this.playing = false;
+    }
+    this.updateControls();
+  }
+
+  updateControls() {
+    this.toggleButton.setAttribute('aria-pressed', String(this.enabled));
+    this.toggleButton.textContent = this.enabled ? 'Voice on' : 'Voice off';
+    this.setStatus(this.enabled ? 'Ready' : 'Silent');
+  }
+
+  setStatus(label, isError = false) {
+    this.statusElement.textContent = label;
+    this.statusElement.classList.toggle('is-error', isError);
+  }
+
+  speakerFor(session) {
+    const usesAuto = this.speakerMode === 'auto';
+    if (usesAuto) return session.source === 'claude' ? 'zundamon' : 'metan';
+    return this.speakerMode;
+  }
+
+  announce(sessions, previousSessions, seedEvents) {
+    const shouldSeedOnly = seedEvents;
+    if (shouldSeedOnly) {
+      this.rememberMessages(sessions);
+      return;
+    }
+
+    const visibleKeys = new Set();
+    for (const session of sessions) {
+      visibleKeys.add(session.key);
+      const message = compactVoiceText(session.lastMessage);
+      const hasMessage = message.length > 0 && Number.isFinite(session.lastMessageAt);
+      const shouldSkipMessage = !hasMessage;
+      if (shouldSkipMessage) continue;
+
+      const previous = previousSessions.get(session.key);
+      const fallbackAt = this.lastSeenMessageAt.has(session.key)
+        ? this.lastSeenMessageAt.get(session.key)
+        : null;
+      const previousAt = Number.isFinite(previous?.lastMessageAt) ? previous.lastMessageAt : fallbackAt;
+      const isKnownSession = previous !== undefined || this.lastSeenMessageAt.has(session.key);
+      const isFreshMessage = isKnownSession
+        && (previousAt === null || session.lastMessageAt > previousAt);
+      const shouldSpeak = this.enabled && isFreshMessage;
+      if (shouldSpeak) this.enqueue({ text: message, speaker: this.speakerFor(session) });
+      this.lastSeenMessageAt.set(session.key, session.lastMessageAt);
+    }
+
+    for (const key of this.lastSeenMessageAt.keys()) {
+      const isVisible = visibleKeys.has(key);
+      if (!isVisible) this.lastSeenMessageAt.delete(key);
+    }
+  }
+
+  rememberMessages(sessions) {
+    for (const session of sessions) {
+      const hasMessageAt = Number.isFinite(session.lastMessageAt);
+      if (hasMessageAt) this.lastSeenMessageAt.set(session.key, session.lastMessageAt);
+    }
+  }
+
+  enqueue(item) {
+    this.queue.push(item);
+    const isTooLong = this.queue.length > VOICE_QUEUE_LIMIT;
+    if (isTooLong) this.queue.splice(0, this.queue.length - VOICE_QUEUE_LIMIT);
+    this.setStatus(this.playing ? 'Speaking' : 'Queued');
+    this.playNext();
+  }
+
+  async playNext() {
+    const shouldWait = this.playing || !this.enabled;
+    if (shouldWait) return;
+    const item = this.queue.shift();
+    const hasItem = item !== undefined;
+    const shouldMarkReady = !hasItem;
+    if (shouldMarkReady) {
+      this.setStatus('Ready');
+      return;
+    }
+
+    this.playing = true;
+    this.setStatus('Speaking');
+    try {
+      const response = await fetch(new URL('voicevox/synthesis', location.href), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(item),
+      });
+      const isOk = response.ok;
+      const shouldFail = !isOk;
+      if (shouldFail) throw new Error(`VOICEVOX ${response.status}`);
+      const audio = await response.blob();
+      await this.playAudio(audio);
+      this.setStatus(this.queue.length ? 'Queued' : 'Ready');
+    } catch {
+      this.setStatus(this.enabled ? 'Engine off' : 'Silent', this.enabled);
+    } finally {
+      this.playing = false;
+      this.currentAudio = null;
+      this.stopCurrentAudio = null;
+      this.playNext();
+    }
+  }
+
+  playAudio(blob) {
+    return new Promise((resolve, reject) => {
+      const objectUrl = URL.createObjectURL(blob);
+      const audio = new Audio(objectUrl);
+      this.currentAudio = audio;
+      const cleanup = () => {
+        URL.revokeObjectURL(objectUrl);
+        audio.removeEventListener('ended', onEnded);
+        audio.removeEventListener('error', onError);
+      };
+      this.stopCurrentAudio = () => {
+        audio.pause();
+        cleanup();
+        reject(new Error('voice playback stopped'));
+      };
+      const onEnded = () => {
+        cleanup();
+        resolve();
+      };
+      const onError = () => {
+        cleanup();
+        reject(new Error('audio playback failed'));
+      };
+      audio.addEventListener('ended', onEnded, { once: true });
+      audio.addEventListener('error', onError, { once: true });
+      audio.play().catch(onError);
+    });
   }
 }
 
@@ -3005,6 +3218,11 @@ class App {
     this.panel = new DetailPanel(this.store, () => this.hud.eventSamples.length);
     this.interaction = new Interaction(canvas, this.store, this.renderer, (key) => this.panel.toggle(key));
     this.a11y = new A11y(sessionList, (key) => this.panel.toggle(key));
+    this.voice = new VoiceAnnouncer({
+      toggleButton: voiceToggle,
+      speakerSelect: voiceSpeaker,
+      statusElement: voiceStatus,
+    });
     this.wsClient = new WSClient({
       onSnapshot: (sessions) => this.onSnapshot(sessions),
       onConnection: (connected) => this.setConnection(connected),
@@ -3042,6 +3260,7 @@ class App {
     this.sim.syncSnapshot();
     this.a11y.sync(sessions);
     this.hud.recordSnapshot(sessions, previousSessions, seedEvents);
+    this.voice.announce(sessions, previousSessions, seedEvents);
     this.panel.refresh();
   }
 

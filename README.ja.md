@@ -42,6 +42,18 @@ pnpm test         # テストを実行
 - `AGENTARIUM_PORT` — 待ち受けポート（デフォルト 41414）
 - `AGENTARIUM_WINDOW_MIN` — 表示対象とする活動ウィンドウ（分、デフォルト 60）
 - `AGENTARIUM_DEBUG` — 1 でパーサ等のデバッグログを stderr に出力
+- `AGENTARIUM_VOICEVOX_URL` — VOICEVOX Engine の URL（デフォルト `http://127.0.0.1:50021`、loopback のみ）
+
+### VOICEVOX 読み上げ
+
+ヘッダの `Voice on` を押すと、新しい AI 発話だけを VOICEVOX で読み上げます。初回ロード時の過去ログは読みません。
+話者は `Auto` / ずんだもん / 四国めたんから選べます。`Auto` は Claude 系をずんだもん、Codex 系を四国めたんにします。
+
+Docker で VOICEVOX Engine を使う例:
+
+```bash
+docker run --rm -p 127.0.0.1:50021:50021 voicevox/voicevox_engine:cpu-latest
+```
 
 ## 見かた
 

@@ -10,6 +10,10 @@ import { createCodexWatcher } from './watchers/codex.js';
 const HOST = '127.0.0.1';
 const DEFAULT_PORT = 41414;
 const ACCESS_TOKEN_BYTES = 32;
+const DEFAULT_VOICEVOX_URL = 'http://127.0.0.1:50021';
+const MAX_JSON_BODY_BYTES = 4096;
+const MAX_VOICE_TEXT_LENGTH = 180;
+const VOICEVOX_TIMEOUT_MS = 10_000;
 const FALLBACK_TEXT = 'UI ファイルが見つかりません';
 const PRIVATE_RESPONSE_HEADERS = {
   'Cache-Control': 'no-store',
@@ -28,6 +32,10 @@ const CONTENT_TYPES = {
 
 const sourceDir = path.dirname(fileURLToPath(import.meta.url));
 const defaultUiRoot = path.resolve(sourceDir, '..', 'ui');
+const voicevoxSpeakers = new Map([
+  ['zundamon', 3],
+  ['metan', 2],
+]);
 
 function requestedPort(value) {
   const port = Number(value);
@@ -40,6 +48,22 @@ function isInside(root, candidate) {
 
 function isAllowedHostname(hostname) {
   return hostname === HOST || hostname === 'localhost';
+}
+
+function configuredVoicevoxUrl(value = DEFAULT_VOICEVOX_URL) {
+  try {
+    const url = new URL(value);
+    const isHttp = url.protocol === 'http:';
+    const isLoopback = isAllowedHostname(url.hostname);
+    const hasCredentials = url.username !== '' || url.password !== '';
+    if (!isHttp || !isLoopback || hasCredentials) return null;
+    url.pathname = '/';
+    url.search = '';
+    url.hash = '';
+    return url;
+  } catch {
+    return null;
+  }
 }
 
 function isAllowedHttpHost(host) {
@@ -95,6 +119,129 @@ function writeResponse(response, status, body, headers = {}) {
   response.end(body);
 }
 
+function readJsonBody(request) {
+  return new Promise((resolve, reject) => {
+    let totalBytes = 0;
+    const chunks = [];
+    request.on('data', (chunk) => {
+      totalBytes += chunk.length;
+      const isTooLarge = totalBytes > MAX_JSON_BODY_BYTES;
+      if (isTooLarge) {
+        reject(new Error('request body too large'));
+        request.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    request.on('end', () => {
+      try {
+        const body = Buffer.concat(chunks).toString('utf8');
+        resolve(body ? JSON.parse(body) : {});
+      } catch (error) {
+        reject(error);
+      }
+    });
+    request.on('error', reject);
+  });
+}
+
+function normalizeVoiceText(value) {
+  const isString = typeof value === 'string';
+  if (!isString) return '';
+  const compact = value.replace(/\s+/g, ' ').trim();
+  const characters = Array.from(compact);
+  const isTooLong = characters.length > MAX_VOICE_TEXT_LENGTH;
+  if (isTooLong) return `${characters.slice(0, MAX_VOICE_TEXT_LENGTH).join('')}…`;
+  return compact;
+}
+
+function voicevoxSpeakerId(value) {
+  const namedSpeaker = typeof value === 'string' ? voicevoxSpeakers.get(value) : undefined;
+  if (namedSpeaker !== undefined) return namedSpeaker;
+  const numericSpeaker = Number(value);
+  const isValidSpeaker = Number.isInteger(numericSpeaker) && numericSpeaker >= 0 && numericSpeaker <= 10_000;
+  return isValidSpeaker ? numericSpeaker : null;
+}
+
+async function fetchWithTimeout(url, options) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), VOICEVOX_TIMEOUT_MS);
+  try {
+    return await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function synthesizeVoicevox({ voicevoxUrl, text, speaker }) {
+  const queryUrl = new URL('/audio_query', voicevoxUrl);
+  queryUrl.searchParams.set('text', text);
+  queryUrl.searchParams.set('speaker', String(speaker));
+  const queryResponse = await fetchWithTimeout(queryUrl, {
+    method: 'POST',
+    headers: { Accept: 'application/json' },
+  });
+  const isQueryOk = queryResponse.ok;
+  if (!isQueryOk) throw new Error(`audio_query failed: ${queryResponse.status}`);
+
+  const audioQuery = await queryResponse.json();
+  const synthesisUrl = new URL('/synthesis', voicevoxUrl);
+  synthesisUrl.searchParams.set('speaker', String(speaker));
+  const synthesisResponse = await fetchWithTimeout(synthesisUrl, {
+    method: 'POST',
+    headers: {
+      Accept: 'audio/wav',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(audioQuery),
+  });
+  const isSynthesisOk = synthesisResponse.ok;
+  if (!isSynthesisOk) throw new Error(`synthesis failed: ${synthesisResponse.status}`);
+
+  return Buffer.from(await synthesisResponse.arrayBuffer());
+}
+
+async function handleVoicevoxRequest(request, response, voicevoxUrl) {
+  const isPost = request.method === 'POST';
+  if (!isPost) {
+    writeResponse(response, 405, 'Method Not Allowed');
+    return;
+  }
+  const hasEngine = voicevoxUrl !== null;
+  if (!hasEngine) {
+    writeResponse(response, 503, 'VOICEVOX endpoint is not allowed');
+    return;
+  }
+
+  try {
+    const payload = await readJsonBody(request);
+    const text = normalizeVoiceText(payload?.text);
+    const speaker = voicevoxSpeakerId(payload?.speaker);
+    const hasText = text.length > 0;
+    const hasSpeaker = speaker !== null;
+    if (!hasText || !hasSpeaker) {
+      writeResponse(response, 400, 'Bad Request');
+      return;
+    }
+
+    const audio = await synthesizeVoicevox({ voicevoxUrl, text, speaker });
+    response.writeHead(200, {
+      ...PRIVATE_RESPONSE_HEADERS,
+      'Content-Type': 'audio/wav',
+      'Content-Length': audio.length,
+    });
+    response.end(audio);
+  } catch (error) {
+    if (process.env.AGENTARIUM_DEBUG) console.error('[server] VOICEVOX error', error);
+    const message = error?.message === 'request body too large' ? 'Payload Too Large' : 'VOICEVOX unavailable';
+    const status = error?.message === 'request body too large' ? 413 : 503;
+    writeResponse(response, status, message);
+  }
+}
+
 function rejectUpgrade(socket, status = 403, message = 'Forbidden') {
   const body = `${message}\n`;
   socket.write([
@@ -108,16 +255,11 @@ function rejectUpgrade(socket, status = 403, message = 'Forbidden') {
   socket.destroy();
 }
 
-function createHttpHandler(uiRoot, accessToken) {
+function createHttpHandler(uiRoot, accessToken, voicevoxUrl) {
   const normalizedRoot = path.resolve(uiRoot);
   return async (request, response) => {
     if (!isAllowedHttpHost(request.headers.host)) {
       writeResponse(response, 403, 'Forbidden');
-      return;
-    }
-
-    if (request.method !== 'GET' && request.method !== 'HEAD') {
-      writeResponse(response, 405, 'Method Not Allowed');
       return;
     }
 
@@ -134,6 +276,17 @@ function createHttpHandler(uiRoot, accessToken) {
     }
     if (access.rootWithoutSlash) {
       writeResponse(response, 308, '', { Location: `${pathname}/` });
+      return;
+    }
+
+    const isVoicevoxRequest = access.relative === 'voicevox/synthesis';
+    if (isVoicevoxRequest) {
+      await handleVoicevoxRequest(request, response, voicevoxUrl);
+      return;
+    }
+
+    if (request.method !== 'GET' && request.method !== 'HEAD') {
+      writeResponse(response, 405, 'Method Not Allowed');
       return;
     }
 
@@ -172,13 +325,14 @@ export async function startServer({
   uiRoot = defaultUiRoot,
   claudeRoot,
   codexRoot,
+  voicevoxUrl = process.env.AGENTARIUM_VOICEVOX_URL ?? DEFAULT_VOICEVOX_URL,
 } = {}) {
   let debounceTimer = null;
   let heartbeatTimer = null;
   let closed = false;
   const accessToken = randomBytes(ACCESS_TOKEN_BYTES).toString('base64url');
   const websocketPath = `/${accessToken}/ws`;
-  const server = createServer(createHttpHandler(uiRoot, accessToken));
+  const server = createServer(createHttpHandler(uiRoot, accessToken, configuredVoicevoxUrl(voicevoxUrl)));
   const wss = new WebSocketServer({ noServer: true });
 
   server.on('upgrade', (request, socket, head) => {

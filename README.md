@@ -42,6 +42,19 @@ Environment variables:
 - `AGENTARIUM_PORT` — listening port (default: 41414)
 - `AGENTARIUM_WINDOW_MIN` — activity window to display, in minutes (default: 60)
 - `AGENTARIUM_DEBUG` — set to 1 to print parser and other debug logs to stderr
+- `AGENTARIUM_VOICEVOX_URL` — VOICEVOX Engine URL (default: `http://127.0.0.1:50021`, loopback only)
+
+### VOICEVOX narration
+
+Press `Voice on` in the header to read only new AI messages through VOICEVOX. Existing
+messages from the initial load are not spoken. Voices can be set to `Auto`, Zundamon,
+or Shikoku Metan. `Auto` uses Zundamon for Claude sessions and Shikoku Metan for Codex sessions.
+
+Example VOICEVOX Engine launch with Docker:
+
+```bash
+docker run --rm -p 127.0.0.1:50021:50021 voicevox/voicevox_engine:cpu-latest
+```
 
 ## Reading the display
 
